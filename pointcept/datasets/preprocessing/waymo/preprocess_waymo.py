@@ -27,11 +27,15 @@ import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor
 from itertools import repeat
 
+import matplotlib.pyplot as plt
+
 
 def create_lidar(frame):
     """Parse and save the lidar data in psd format.
     Args:
         frame (:obj:`Frame`): Open dataset frame proto.
+    Returns:
+
     """
     (
         range_images,
@@ -40,6 +44,7 @@ def create_lidar(frame):
         range_image_top_pose,
     ) = frame_utils.parse_range_image_and_camera_projection(frame)
 
+    # first return
     points, cp_points, valid_masks = convert_range_image_to_point_cloud(
         frame,
         range_images,
@@ -47,6 +52,8 @@ def create_lidar(frame):
         range_image_top_pose,
         keep_polar_features=True,
     )
+
+    # second return
     points_ri2, cp_points_ri2, valid_masks_ri2 = convert_range_image_to_point_cloud(
         frame,
         range_images,
@@ -57,17 +64,22 @@ def create_lidar(frame):
     )
 
     # 3d points in vehicle frame.
-    points_all = np.concatenate(points, axis=0)
+    points_all = np.concatenate(points, axis=0)  # [(N_1,6),(N_2,6),...,(N_5,6)] => (N,6)
+    # 6 表示 (range,intensity,elongation,x,y,z)
     points_all_ri2 = np.concatenate(points_ri2, axis=0)
     # point labels.
-
     points_all = np.concatenate([points_all, points_all_ri2], axis=0)
 
-    velodyne = np.c_[points_all[:, 3:6], points_all[:, 1]]
-    velodyne = velodyne.reshape((velodyne.shape[0] * velodyne.shape[1]))
+    velodyne = np.c_[points_all[:, 3:6], points_all[:, 1]]  # (x,y,z) + (intensity) => (x,y,z,intensity)
+    velodyne = velodyne.reshape((velodyne.shape[0] * velodyne.shape[1]))  # (N,4) -> (N*4)
+
+    # cp_points (camera projection points)
+    cp_points_all = np.concatenate(cp_points, axis=0)  # (N_ri1,6)
+    cp_points_all_ri2 = np.concatenate(cp_points_ri2, axis=0)  # (N_ri2,6)
+    cp_velodyne = np.concatenate([cp_points_all, cp_points_all_ri2], axis=0)  # (N_all,6)
 
     valid_masks = [valid_masks, valid_masks_ri2]
-    return velodyne, valid_masks
+    return velodyne, cp_velodyne, valid_masks
 
 
 def create_label(frame):
@@ -95,7 +107,7 @@ def create_label(frame):
 
 
 def convert_range_image_to_cartesian(
-    frame, range_images, range_image_top_pose, ri_index=0, keep_polar_features=False
+        frame, range_images, range_image_top_pose, ri_index=0, keep_polar_features=False
 ):
     """Convert range images from polar coordinates to Cartesian coordinates.
 
@@ -181,12 +193,12 @@ def convert_range_image_to_cartesian(
 
 
 def convert_range_image_to_point_cloud(
-    frame,
-    range_images,
-    camera_projections,
-    range_image_top_pose,
-    ri_index=0,
-    keep_polar_features=False,
+        frame,
+        range_images,
+        camera_projections,
+        range_image_top_pose,
+        ri_index=0,
+        keep_polar_features=False,
 ):
     """Convert range images to point cloud.
 
@@ -241,7 +253,7 @@ def convert_range_image_to_point_cloud(
 
 
 def convert_range_image_to_point_cloud_labels(
-    frame, range_images, segmentation_labels, ri_index=0
+        frame, range_images, segmentation_labels, ri_index=0
 ):
     """Convert segmentation labels from range images to point clouds.
 
@@ -303,16 +315,17 @@ def handle_process(file_path, output_root, test_frame_list):
         os.makedirs(save_path / timestamp, exist_ok=True)
 
         # extract frame pass above check
-        point_cloud, valid_masks = create_lidar(frame)
+        point_cloud, cp_point_cloud, valid_masks = create_lidar(frame)
+        # point cloud:
         point_cloud = point_cloud.reshape(-1, 4)
         coord = point_cloud[:, :3]
         strength = np.tanh(point_cloud[:, -1].reshape([-1, 1]))
         pose = np.array(frame.pose.transform, np.float32).reshape(4, 4)
         mask = np.array(valid_masks, dtype=object)
 
-        np.save(save_path / timestamp / "coord.npy", coord)
+        np.save(save_path / timestamp / "coord.npy", coord)  # 点云坐标 (x,y,z)
         np.save(save_path / timestamp / "strength.npy", strength)
-        np.save(save_path / timestamp / "pose.npy", pose)
+        np.save(save_path / timestamp / "pose.npy", pose)  #
 
         # save mask for reverse prediction
         if split != "training":
@@ -323,6 +336,80 @@ def handle_process(file_path, output_root, test_frame_list):
             # ignore TYPE_UNDEFINED, ignore_index 0 -> -1
             label = create_label(frame)[:, 1].reshape([-1]) - 1
             np.save(save_path / timestamp / "segment.npy", label)
+
+        # save image & camera projection
+        images = sorted(frame.images, key=lambda i: i.name)
+
+        for camera_image in images:
+            image_name = camera_image.name
+            image_path = save_path / timestamp / f"image_{image_name}.jpg"
+            # save image
+            with open(image_path, 'wb') as fp:
+                fp.write(camera_image.image)
+
+        # save camera projections
+        cp_points_iduv = cp_point_cloud[..., :3]
+        np.save(save_path / timestamp / f"cp_points.npy", cp_points_iduv)
+
+        # vis for debug
+        vis_debug = True
+        if vis_debug:
+            img_id = np.random.randint(low=0, high=len(images))
+            mask = cp_point_cloud[..., 0] == images[img_id].name
+            cp_points_this_camera = cp_point_cloud[mask]
+            points_distance = np.linalg.norm(coord, ord=2, axis=-1, keepdims=True)
+            points_distance_this_camera = points_distance[mask]
+            projected_points = np.concatenate(
+                [cp_points_this_camera[..., 1:3], points_distance_this_camera], axis=-1)
+            plot_points_on_image(projected_points, images[img_id], point_size=5.0)
+            plt.savefig(save_path / timestamp / f"cp_vis_image_{images[img_id].name}.jpg")
+            plt.close()
+            # plt.show()
+
+
+def plot_points_on_image(projected_points, camera_image,
+                         point_size=5.0):
+    """Plots points on a camera image.
+
+    Args:
+      projected_points: [N, 3] numpy array. The inner dims are
+        [camera_x, camera_y, range].
+      camera_image: jpeg encoded camera image.
+      point_size: the point size.
+
+    """
+
+    def rgba_func(r):
+        """Generates a color based on range.
+
+        Args:
+          r: the range value of a given point.
+        Returns:
+          The color for a given range
+        """
+        c = plt.get_cmap('jet')((r % 20.0) / 20.0)
+        c = list(c)
+        c[-1] = 0.5  # alpha
+        return c
+
+    def plot_image(camera_image):
+        """Plot a cmaera image."""
+        plt.figure(figsize=(20, 12))
+        plt.imshow(tf.image.decode_jpeg(camera_image.image))
+        plt.grid("off")
+
+    plot_image(camera_image)
+
+    xs = []
+    ys = []
+    colors = []
+
+    for point in projected_points:
+        xs.append(point[0])  # width, col
+        ys.append(point[1])  # height, row
+        colors.append(rgba_func(point[2]))
+
+    plt.scatter(xs, ys, c=colors, s=point_size, edgecolors="none")
 
 
 if __name__ == "__main__":

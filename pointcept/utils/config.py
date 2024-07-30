@@ -355,7 +355,7 @@ class Config:
             # check if users specify a wrong suffix for python
             warnings.warn('Please check "file_format", the file format may be .py')
         with tempfile.NamedTemporaryFile(
-            "w", encoding="utf-8", suffix=file_format, delete=False
+                "w", encoding="utf-8", suffix=file_format, delete=False
         ) as temp_file:
             temp_file.write(cfg_str)
             # on windows, previous implementation cause error
@@ -649,16 +649,16 @@ class DictAction(Action):
             inside these brackets are ignored.
             """
             assert (string.count("(") == string.count(")")) and (
-                string.count("[") == string.count("]")
+                    string.count("[") == string.count("]")
             ), f"Imbalanced brackets exist in {string}"
             end = len(string)
             for idx, char in enumerate(string):
                 pre = string[:idx]
                 # The string before this ',' is balanced
                 if (
-                    (char == ",")
-                    and (pre.count("(") == pre.count(")"))
-                    and (pre.count("[") == pre.count("]"))
+                        (char == ",")
+                        and (pre.count("(") == pre.count(")"))
+                        and (pre.count("[") == pre.count("]"))
                 ):
                     end = idx
                     break
@@ -681,7 +681,7 @@ class DictAction(Action):
             comma_idx = find_next_comma(val)
             element = DictAction._parse_iterable(val[:comma_idx])
             values.append(element)
-            val = val[comma_idx + 1 :]
+            val = val[comma_idx + 1:]
         if is_tuple:
             values = tuple(values)
         return values
